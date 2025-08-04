@@ -8,6 +8,7 @@ import sys
 import collections
 import csv
 import io
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -89,7 +90,7 @@ def find_wikidata_entries_by_gnis_ids_batch(gnis_ids, max_retries=3):
     query = SPARQL_QUERY.format(gnis_ids=gnis_id_string)
 
     headers = {
-        'User-Agent': 'OSM-Wikidata-Updater/1.0 (your.email@example.com; find_osm_features.py)',
+        'User-Agent': 'Wikidata-OSM-Conflator/1.0 (+https://github.com/Necessarycoot72/US-wikidata-osm-conflator)',
         'Accept': 'application/json'
     }
 
@@ -124,7 +125,7 @@ def find_wikidata_entries_by_gnis_ids_batch(gnis_ids, max_retries=3):
 
 
 
-def process_features_concurrently(features_to_check, master_results_list, batch_size):
+def process_features_in_batches(features_to_check, master_results_list, batch_size):
     """
     Processes features in batches to find Wikidata entries.
     Updates master_results_list in place.
@@ -202,17 +203,6 @@ def fetch_and_prepare_osm_data(query_timeout):
     if gnis_ids_to_purge_shared:
         logging.info(f"Identified {len(gnis_ids_to_purge_shared)} GNIS IDs used by multiple OSM features. "
                      f"{count_purged_due_to_shared_gnis} OSM features will be purged.")
-        if purged_features_shared_gnis_json:
-            target_purged_file = 'purged_duplicate_gnis_features.json'
-            temp_purged_file = f"{target_purged_file}.tmp"
-            try:
-                with open(temp_purged_file, 'w', encoding='utf-8') as f:
-                    json.dump(purged_features_shared_gnis_json, f, indent=2)
-                os.replace(temp_purged_file, target_purged_file)
-                logging.info(f"Saved {len(purged_features_shared_gnis_json)} purged features (shared GNIS) to {target_purged_file}.")
-            except Exception as e:
-                logging.error(f"Error saving purged (shared GNIS) features to {target_purged_file}: {e}")
-                if os.path.exists(temp_purged_file): os.remove(temp_purged_file)
 
     # Deduplication Stage 2: Purge features whose 'gnis:feature_id' tag contains multiple IDs.
     features_with_multiple_ids_in_tag_list = []
@@ -228,16 +218,6 @@ def fetch_and_prepare_osm_data(query_timeout):
     count_purged_due_to_multiple_ids_in_tag = len(features_with_multiple_ids_in_tag_list)
     if features_with_multiple_ids_in_tag_list:
         logging.info(f"Found {count_purged_due_to_multiple_ids_in_tag} features containing multiple GNIS IDs in their tag value; these will be purged.")
-        target_multi_id_file = 'gnis_ids_on_multiple_features.json'
-        temp_multi_id_file = f"{target_multi_id_file}.tmp"
-        try:
-            with open(temp_multi_id_file, 'w', encoding='utf-8') as f:
-                json.dump(features_with_multiple_ids_in_tag_list, f, indent=2)
-            os.replace(temp_multi_id_file, target_multi_id_file)
-            logging.info(f"Saved {count_purged_due_to_multiple_ids_in_tag} features with multiple GNIS IDs in tag to {target_multi_id_file}.")
-        except Exception as e:
-            logging.error(f"Error saving features with multiple GNIS IDs in tag to {target_multi_id_file}: {e}")
-            if os.path.exists(temp_multi_id_file): os.remove(temp_multi_id_file)
 
     features_for_processing_this_run = single_gnis_id_features_list
 
@@ -265,8 +245,8 @@ def process_wikidata_lookups(features_to_process_list, master_results_list, batc
         return master_results_list # Return the list as is.
 
     # Since we are batching, the async processing is simpler.
-    # The `process_features_concurrently` function will be refactored to handle batches.
-    count_newly_added = process_features_concurrently(
+    # The `process_features_in_batches` function will be refactored to handle batches.
+    count_newly_added = process_features_in_batches(
         features_to_process_list,
         master_results_list, # Passed by reference, updated in place.
         batch_size,
@@ -280,13 +260,16 @@ def process_wikidata_lookups(features_to_process_list, master_results_list, batc
 
 def save_final_results_and_cleanup(final_results_list, purged_shared, purged_multi_id):
     """Saves final results and purged features to JSON files."""
+    output_dir = "output"
+    os.makedirs(output_dir, exist_ok=True)
+
     if final_results_list:
         try:
             # Sort results for consistent output, helpful for diffs and review.
             sorted_results = sorted(final_results_list, key=lambda x: (x.get('osm_id', 0), x.get('gnis_id', '')))
-            with open('osm_features_to_update.json', 'w', encoding='utf-8') as f:
+            with open(os.path.join(output_dir, 'osm_features_to_update.json'), 'w', encoding='utf-8') as f:
                 json.dump(sorted_results, f, indent=2)
-            logging.info(f"Saved {len(sorted_results)} total features to osm_features_to_update.json")
+            logging.info(f"Saved {len(sorted_results)} total features to output/osm_features_to_update.json")
         except IOError as e:
             logging.error(f"Error saving final results to JSON: {e}")
     else: # No results to save.
@@ -294,24 +277,24 @@ def save_final_results_and_cleanup(final_results_list, purged_shared, purged_mul
 
     if purged_shared:
         try:
-            with open('purged_duplicate_gnis_features.json', 'w', encoding='utf-8') as f:
+            with open(os.path.join(output_dir, 'duplicate_gnis_features.json'), 'w', encoding='utf-8') as f:
                 json.dump(purged_shared, f, indent=2)
-            logging.info(f"Saved {len(purged_shared)} purged features (shared GNIS) to purged_duplicate_gnis_features.json")
+            logging.info(f"Saved {len(purged_shared)} purged features (shared GNIS) to output/duplicate_gnis_features.json")
         except IOError as e:
             logging.error(f"Error saving purged (shared GNIS) features: {e}")
 
     if purged_multi_id:
         try:
-            with open('gnis_ids_on_multiple_features.json', 'w', encoding='utf-8') as f:
+            with open(os.path.join(output_dir, 'gnis_ids_on_multiple_features.json'), 'w', encoding='utf-8') as f:
                 json.dump(purged_multi_id, f, indent=2)
-            logging.info(f"Saved {len(purged_multi_id)} purged features (multiple GNIS IDs) to gnis_ids_on_multiple_features.json")
+            logging.info(f"Saved {len(purged_multi_id)} purged features (multiple GNIS IDs) to output/gnis_ids_on_multiple_features.json")
         except IOError as e:
             logging.error(f"Error saving purged (multiple GNIS IDs) features: {e}")
 
 
-def main_async(query_timeout, batch_size):
-    """Main asynchronous function for the OSM feature processing workflow."""
-    logging.info("Starting main asynchronous execution.")
+def main(query_timeout, batch_size):
+    """Main function for the OSM feature processing workflow."""
+    logging.info("Starting main execution.")
 
     (
         features_for_processing_this_run,
@@ -322,6 +305,8 @@ def main_async(query_timeout, batch_size):
     # Early exit if no features to process.
     if not features_for_processing_this_run:
         logging.info("No features to process this run. Exiting.")
+        # Still save purged files if any, even if no features remain for processing.
+        save_final_results_and_cleanup([], purged_shared, purged_multi_id)
         return
 
     # Process Wikidata Lookups.
@@ -334,78 +319,40 @@ def main_async(query_timeout, batch_size):
     # Save final results.
     save_final_results_and_cleanup(results, purged_shared, purged_multi_id)
 
+
 if __name__ == "__main__":
+    DEFAULT_TIMEOUT = 10000
+    DEFAULT_BATCH_SIZE = 10000
+
     parser = argparse.ArgumentParser(description="Fetch OSM features with GNIS IDs and find corresponding Wikidata entries.")
     parser.add_argument(
         "--timeout",
         type=int,
-        default=None, # Handled by prompt or default value if not given.
-        help="Timeout in seconds for Overpass API query. Prompts if not set."
+        default=DEFAULT_TIMEOUT,
+        help=f"Timeout in seconds for Overpass API query. Default: {DEFAULT_TIMEOUT}"
     )
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=None,
-        help="Number of GNIS IDs to batch in a single Wikidata query."
+        default=DEFAULT_BATCH_SIZE,
+        help=f"Number of GNIS IDs to batch in a single Wikidata query. Default: {DEFAULT_BATCH_SIZE}"
     )
     args = parser.parse_args()
 
-    effective_timeout = args.timeout
-    DEFAULT_TIMEOUT = 10000
+    # Validate arguments
+    if args.timeout <= 0:
+        logging.warning(f"Timeout must be positive. Using default {DEFAULT_TIMEOUT}s.")
+        args.timeout = DEFAULT_TIMEOUT
 
-    if effective_timeout is None:
-        try:
-            user_input_timeout_str = input(f"Enter Overpass API timeout in seconds (e.g., {DEFAULT_TIMEOUT}, Enter for default {DEFAULT_TIMEOUT}s): ").strip()
-            if not user_input_timeout_str: # User pressed Enter.
-                effective_timeout = DEFAULT_TIMEOUT
-            else:
-                effective_timeout = int(user_input_timeout_str)
-                if effective_timeout <= 0:
-                    logging.warning(f"Timeout must be positive. Using default {DEFAULT_TIMEOUT}s.")
-                    effective_timeout = DEFAULT_TIMEOUT
-                else:
-                    logging.info(f"User-defined Overpass API timeout: {effective_timeout}s.")
-        except ValueError: # Non-integer input.
-            logging.warning(f"Invalid timeout input. Using default {DEFAULT_TIMEOUT}s.")
-            effective_timeout = DEFAULT_TIMEOUT
-    else: # Timeout provided via CLI.
-        if effective_timeout <= 0:
-            logging.warning(f"CLI timeout --timeout {args.timeout} not positive. Using default {DEFAULT_TIMEOUT}s.")
-            effective_timeout = DEFAULT_TIMEOUT
-        else:
-            logging.info(f"Using Overpass API timeout from CLI: {effective_timeout}s.")
+    if args.batch_size <= 0:
+        logging.warning(f"Batch size must be positive. Using default {DEFAULT_BATCH_SIZE}.")
+        args.batch_size = DEFAULT_BATCH_SIZE
 
-    logging.info(f"Overpass API timeout for this session: {effective_timeout}s.")
-
-    effective_batch_size = args.batch_size
-    DEFAULT_BATCH_SIZE = 500
-
-    if effective_batch_size is None:
-        try:
-            user_input_batch_size_str = input(f"Enter Wikidata query batch size (e.g., {DEFAULT_BATCH_SIZE}, Enter for default {DEFAULT_BATCH_SIZE}): ").strip()
-            if not user_input_batch_size_str:
-                effective_batch_size = DEFAULT_BATCH_SIZE
-            else:
-                effective_batch_size = int(user_input_batch_size_str)
-                if effective_batch_size <= 0:
-                    logging.warning(f"Batch size must be positive. Using default {DEFAULT_BATCH_SIZE}.")
-                    effective_batch_size = DEFAULT_BATCH_SIZE
-                else:
-                    logging.info(f"User-defined batch size: {effective_batch_size}.")
-        except ValueError:
-            logging.warning(f"Invalid batch size input. Using default {DEFAULT_BATCH_SIZE}.")
-            effective_batch_size = DEFAULT_BATCH_SIZE
-    else:
-        if effective_batch_size <= 0:
-            logging.warning(f"CLI batch size --batch-size {args.batch_size} not positive. Using default {DEFAULT_BATCH_SIZE}.")
-            effective_batch_size = DEFAULT_BATCH_SIZE
-        else:
-            logging.info(f"Using batch size from CLI: {effective_batch_size}.")
-
-    logging.info(f"Wikidata query batch size for this session: {effective_batch_size}.")
+    logging.info(f"Using Overpass API timeout: {args.timeout}s.")
+    logging.info(f"Using Wikidata query batch size: {args.batch_size}.")
 
     start_time = time.time()
-    main_async(effective_timeout, effective_batch_size) # Run the main async workflow.
+    main(args.timeout, args.batch_size) # Run the main workflow.
     end_time = time.time()
     logging.info(f"Total execution time: {end_time - start_time:.2f}s.")
     logging.info("Processing complete. It is safe to exit the terminal.")
